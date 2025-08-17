@@ -4,5 +4,5 @@ langchain==0.2.12
 langchain-community==0.2.11
 langchain-openai==0.1.25
 tiktoken==0.7.0
-faiss-cpu==1.8.0.post1
+faiss-cpu==1.7.4
 pypdf==4.2.0
