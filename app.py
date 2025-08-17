@@ -4,12 +4,13 @@ from typing import List, Dict
 
 # LangChain / OpenAI
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-    from langchain_community.vectorstores import FAISS  # LC >= 0.1.x with split packages
-except Exception:
-    from langchain.vectorstores import FAISS           # older LC fallback
-
+try:
+    from langchain_community.vectorstores import FAISS  # LC >= 0.1.x
+except ImportError:
+    from langchain.vectorstores import FAISS            # fallback for older LC
 from langchain.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
+
 
 # Optional for PDF ingest on first run
 try:
