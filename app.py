@@ -10,7 +10,13 @@ from openai import OpenAI
 client = OpenAI()  # reads OPENAI_API_KEY from env/Streamlit secrets
 
 # ---------- Minimal LangChain Embeddings adapter ----------
-class OpenAIEmbedder:
+from langchain_core.embeddings import Embeddings
+from typing import List, Iterable
+from openai import OpenAI
+
+client = OpenAI()
+
+class OpenAIEmbedder(Embeddings):
     """LangChain-compatible embeddings using OpenAI 1.x SDK."""
     def __init__(self, model: str = "text-embedding-3-small"):
         self.model = model
@@ -23,6 +29,12 @@ class OpenAIEmbedder:
             resp = client.embeddings.create(model=self.model, input=batch)
             out.extend([d.embedding for d in resp.data])
         return out
+
+    def embed_documents(self, texts: Iterable[str]) -> List[List[float]]:
+        return self._embed(list(texts))
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed([text])[0]
 
     # LangChain expects these two:
     def embed_documents(self, texts: Iterable[str]) -> List[List[float]]:
