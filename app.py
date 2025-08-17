@@ -14,13 +14,11 @@ from langchain_openai import ChatOpenAI  # only the chat model; embeddings are c
 
 # --------- Minimal embedder that uses openai>=1 directly (no proxies kwarg issue) ---------
 class OpenAIEmbedder:
-    """
-    Drop-in replacement for LangChain's Embeddings interface.
-    Implements `embed_documents` and `embed_query` using the v1 OpenAI SDK.
-    """
     def __init__(self, api_key: str, model: str = "text-embedding-3-small"):
-        self.client = OpenAI(api_key=api_key)
+        os.environ["OPENAI_API_KEY"] = api_key   # set for the SDK
+        self.client = OpenAI()                   # no args
         self.model = model
+
 
     def _embed(self, texts: List[str]) -> List[List[float]]:
         # OpenAI embeddings API accepts up to ~2048 inputs per call; we’ll chunk just in case.
