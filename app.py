@@ -123,6 +123,5 @@ Question:
 
 Answer as C.S. Lewis:
 """, 
-    
 )
 
