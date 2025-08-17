@@ -1,113 +1,134 @@
 # app.py
 import os
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Iterable
 
 import streamlit as st
+from openai import OpenAI
 
-# LangChain + OpenAI
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import SKLearnVectorStore
-from langchain.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_openai import ChatOpenAI  # only the chat model; embeddings are custom
 
-# Optional: PDF reading (safe to run without it)
+# --------- Minimal embedder that uses openai>=1 directly (no proxies kwarg issue) ---------
+class OpenAIEmbedder:
+    """
+    Drop-in replacement for LangChain's Embeddings interface.
+    Implements `embed_documents` and `embed_query` using the v1 OpenAI SDK.
+    """
+    def __init__(self, api_key: str, model: str = "text-embedding-3-small"):
+        self.client = OpenAI(api_key=api_key)
+        self.model = model
+
+    def _embed(self, texts: List[str]) -> List[List[float]]:
+        # OpenAI embeddings API accepts up to ~2048 inputs per call; we’ll chunk just in case.
+        out: List[List[float]] = []
+        BATCH = 512
+        for i in range(0, len(texts), BATCH):
+            batch = texts[i:i+BATCH]
+            resp = self.client.embeddings.create(model=self.model, input=batch)
+            out.extend([d.embedding for d in resp.data])
+        return out
+
+    def embed_documents(self, texts: Iterable[str]) -> List[List[float]]:
+        return self._embed(list(texts))
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed([text])[0]
+
+# --------- Optional PDF ingest ---------
 try:
     from pypdf import PdfReader
 except Exception:
-    PdfReader = None  # we’ll skip PDFs if pypdf isn’t available
+    PdfReader = None  # handled later
 
-
-# ------------------------- Streamlit UI -------------------------
-st.set_page_config(page_title="Ask C.S. Lewis", page_icon="📚", layout="centered")
+# --------- Streamlit UI ---------
+st.set_page_config(page_title="Ask C.S. Lewis Anything", page_icon="📚")
 st.title("📚 Ask C.S. Lewis")
-st.caption("Answers are composed *only* from the source texts you provide.")
+st.markdown("Answers are composed only from the source texts you provide.")
 st.divider()
 
 # Chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
-
-# Secrets / API key
+# Secrets
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     st.error("❌ Missing OPENAI_API_KEY. Add it in Streamlit → Settings → Secrets.")
     st.stop()
 
+# Paths
+DATA_DIR = Path("data")
+INDEX_DIR = Path("sklearn_index")  # folder where we’ll persist SKLearnVectorStore
+INDEX_DIR.mkdir(exist_ok=True)
 
-# ------------------------- Data ingest -------------------------
-DATA_DIR = Path("data")  # put your .txt / .pdf files here
+# --------- Build / load the vector store using our custom embedder ---------
+@st.cache_resource(show_spinner=True)
+def load_vectordb() -> SKLearnVectorStore:
+    embedder = OpenAIEmbedder(api_key=OPENAI_API_KEY, model="text-embedding-3-small")
 
-@st.cache_resource(show_spinner=False)
-def build_vectorstore() -> SKLearnVectorStore:
-    """
-    Build a lightweight in-memory vector store using scikit-learn.
-    Pure Python: no FAISS, no tiktoken, no native compilers needed.
-    """
-    emb = OpenAIEmbeddings(api_key=OPENAI_API_KEY, model="text-embedding-3-small")
-
-    if not DATA_DIR.exists():
-        st.error("No 'data/' folder found. Add TXT/PDF files under 'data/'.")
-        st.stop()
-
+    # If you already persisted docs, we can load them by re-embedding (SKLearn needs vectors).
+    # To keep things simple and hermetic on Streamlit Cloud, we (re)build quickly from /data.
     texts: List[str] = []
     metadatas: List[Dict] = []
 
     # TXT files
-    for p in DATA_DIR.rglob("*.txt"):
-        try:
-            content = p.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            content = ""
-        if content.strip():
-            texts.append(content)
-            metadatas.append({"source": str(p), "page": "N/A"})
-
-    # PDF files (optional)
-    if PdfReader:
-        for p in DATA_DIR.rglob("*.pdf"):
+    if DATA_DIR.exists():
+        for p in DATA_DIR.rglob("*.txt"):
             try:
-                pdf = PdfReader(str(p))
-                for i, page in enumerate(pdf.pages, start=1):
-                    try:
-                        page_text = page.extract_text() or ""
-                    except Exception:
-                        page_text = ""
-                    if page_text.strip():
-                        texts.append(page_text)
-                        metadatas.append({"source": str(p), "page": i})
+                t = p.read_text(encoding="utf-8", errors="ignore")
+                if t.strip():
+                    texts.append(t)
+                    metadatas.append({"source": str(p), "page": "N/A"})
             except Exception:
-                # continue on any single-PDF failure
-                continue
-    else:
-        st.info("`pypdf` not installed, skipping PDFs. Add `pypdf` to requirements.txt to enable.")
+                pass
+
+        # PDFs (basic: one chunk per page)
+        if PdfReader:
+            for p in DATA_DIR.rglob("*.pdf"):
+                try:
+                    pdf = PdfReader(str(p))
+                    for i, page in enumerate(pdf.pages, start=1):
+                        try:
+                            t = page.extract_text() or ""
+                        except Exception:
+                            t = ""
+                        if t.strip():
+                            texts.append(t)
+                            metadatas.append({"source": str(p), "page": i})
+                except Exception:
+                    pass
+        else:
+            st.info("`pypdf` not available; skipping PDFs. (Add `pypdf` to requirements to enable.)")
 
     if not texts:
-        st.error("No usable text found in 'data/'. Add PDFs/TXTs with content.")
-        st.stop()
+        st.warning("No texts found in /data. The bot will still run, but answers will be generic.")
+        # Create an empty store (avoid crash)
+        return SKLearnVectorStore.from_texts(
+            texts=[""], embedding=embedder, metadatas=[{"source": "none", "page": 0}]
+        )
 
-    # Build the in-memory index
-    return SKLearnVectorStore.from_texts(texts=texts, embedding=emb, metadatas=metadatas)
+    return SKLearnVectorStore.from_texts(texts=texts, embedding=embedder, metadatas=metadatas)
 
+with st.spinner("Loading knowledge base..."):
+    vectordb = load_vectordb()
 
-with st.spinner("Loading knowledge base…"):
-    vectordb = build_vectorstore()
-
-
-# ------------------------- LLM + Chain -------------------------
-llm = ChatOpenAI(api_key=OPENAI_API_KEY, model="gpt-4o-mini", temperature=0.3)
+# --------- LLM, retriever, and prompt ---------
+llm: BaseChatModel = ChatOpenAI(api_key=OPENAI_API_KEY, model="gpt-4o-mini", temperature=0.3)
+retriever = vectordb.as_retriever(search_type="mmr", search_kwargs={"k": 6, "fetch_k": 12})
 
 prompt = PromptTemplate(
     input_variables=["context", "question"],
     template=(
-        "You are C.S. Lewis, writing in first person.\n"
-        "Compose your answer ONLY from the excerpts below (drawn from your published works).\n"
-        "Do not say 'the text says'—write as yourself. Avoid modern references and do not refer to yourself as deceased.\n"
-        "\n---\nExcerpts:\n{context}\n\n"
+        "You are C.S. Lewis, writing in the first person. "
+        "Use ONLY the excerpts below; do not reference sources explicitly.\n\n"
+        "Excerpts:\n{context}\n\n"
         "Question:\n{question}\n\n"
         "Answer as C.S. Lewis:\n"
     ),
@@ -115,32 +136,24 @@ prompt = PromptTemplate(
 
 qa = RetrievalQA.from_chain_type(
     llm=llm,
-    retriever=vectordb.as_retriever(search_type="mmr", search_kwargs={"k": 6, "fetch_k": 12}),
+    retriever=retriever,
     chain_type="stuff",
     chain_type_kwargs={"prompt": prompt},
-    return_source_documents=True,
 )
 
-
-# ------------------------- Chat loop -------------------------
-user_input = st.chat_input("Ask C.S. Lewis anything about the texts…")
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
+# --------- Chat box ---------
+user_q = st.chat_input("Ask your question…")
+if user_q:
+    st.session_state.messages.append({"role": "user", "content": user_q})
     with st.chat_message("user"):
-        st.markdown(user_input)
+        st.markdown(user_q)
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
-            result = qa({"query": user_input})
-            answer: str = result["result"]
-            sources = result.get("source_documents", []) or []
-            st.markdown(answer)
+            try:
+                ans = qa.run(user_q)
+            except Exception as e:
+                ans = f"Sorry, I hit an error: `{e}`"
+            st.markdown(ans)
 
-            # show simple sources block
-            if sources:
-                with st.expander("Sources"):
-                    for i, doc in enumerate(sources, start=1):
-                        meta = doc.metadata or {}
-                        st.write(f"**{i}.** {meta.get('source','?')}  (page: {meta.get('page','?')})")
-
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+    st.session_state.messages.append({"role": "assistant", "content": ans})
