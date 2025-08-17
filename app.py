@@ -6,43 +6,45 @@ from typing import List, Dict, Iterable
 import streamlit as st
 from openai import OpenAI
 
-from langchain_community.vectorstores import SKLearnVectorStore
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_openai import ChatOpenAI  # only the chat model; embeddings are custom
+# ---------- OpenAI client (1.x) ----------
+client = OpenAI()  # reads OPENAI_API_KEY from env/Streamlit secrets
 
-# --------- Minimal embedder that uses openai>=1 directly (no proxies kwarg issue) ---------
+# ---------- Minimal LangChain Embeddings adapter ----------
 class OpenAIEmbedder:
-    def __init__(self, api_key: str, model: str = "text-embedding-3-small"):
-        os.environ["OPENAI_API_KEY"] = api_key   # set for the SDK
-        self.client = OpenAI()                   # no args
+    """LangChain-compatible embeddings using OpenAI 1.x SDK."""
+    def __init__(self, model: str = "text-embedding-3-small"):
         self.model = model
 
-
     def _embed(self, texts: List[str]) -> List[List[float]]:
-        # OpenAI embeddings API accepts up to ~2048 inputs per call; we’ll chunk just in case.
         out: List[List[float]] = []
-        BATCH = 512
+        BATCH = 256
         for i in range(0, len(texts), BATCH):
-            batch = texts[i:i+BATCH]
-            resp = self.client.embeddings.create(model=self.model, input=batch)
+            batch = texts[i:i + BATCH]
+            resp = client.embeddings.create(model=self.model, input=batch)
             out.extend([d.embedding for d in resp.data])
         return out
 
+    # LangChain expects these two:
     def embed_documents(self, texts: Iterable[str]) -> List[List[float]]:
         return self._embed(list(texts))
 
     def embed_query(self, text: str) -> List[float]:
         return self._embed([text])[0]
 
-# --------- Optional PDF ingest ---------
+# ---------- Optional PDF ingest ----------
 try:
     from pypdf import PdfReader
 except Exception:
-    PdfReader = None  # handled later
+    PdfReader = None
 
-# --------- Streamlit UI ---------
+# ---------- LangChain bits ----------
+from langchain_openai import ChatOpenAI
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_community.vectorstores import FAISS
+
+# ---------- Streamlit UI ----------
 st.set_page_config(page_title="Ask C.S. Lewis Anything", page_icon="📚")
 st.title("📚 Ask C.S. Lewis")
 st.markdown("Answers are composed only from the source texts you provide.")
@@ -55,24 +57,18 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Secrets
+# Secrets / API key check
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     st.error("❌ Missing OPENAI_API_KEY. Add it in Streamlit → Settings → Secrets.")
     st.stop()
 
-# Paths
+# Data path
 DATA_DIR = Path("data")
-INDEX_DIR = Path("sklearn_index")  # folder where we’ll persist SKLearnVectorStore
-INDEX_DIR.mkdir(exist_ok=True)
 
-# --------- Build / load the vector store using our custom embedder ---------
-@st.cache_resource(show_spinner=True)
-def load_vectordb() -> SKLearnVectorStore:
-    embedder = OpenAIEmbedder(api_key=OPENAI_API_KEY, model="text-embedding-3-small")
-
-    # If you already persisted docs, we can load them by re-embedding (SKLearn needs vectors).
-    # To keep things simple and hermetic on Streamlit Cloud, we (re)build quickly from /data.
+# ---------- Build / load the vector store ----------
+@st.cache_resource
+def load_vectordb():
     texts: List[str] = []
     metadatas: List[Dict] = []
 
@@ -87,7 +83,7 @@ def load_vectordb() -> SKLearnVectorStore:
             except Exception:
                 pass
 
-        # PDFs (basic: one chunk per page)
+        # PDFs (basic extraction: one chunk per page)
         if PdfReader:
             for p in DATA_DIR.rglob("*.pdf"):
                 try:
@@ -103,21 +99,23 @@ def load_vectordb() -> SKLearnVectorStore:
                 except Exception:
                     pass
         else:
-            st.info("`pypdf` not available; skipping PDFs. (Add `pypdf` to requirements to enable.)")
+            st.info("`pypdf` not available; skipping PDFs. Add `pypdf` to requirements to enable.")
+
+    embedder = OpenAIEmbedder(model="text-embedding-3-small")
 
     if not texts:
-        st.warning("No texts found in /data. The bot will still run, but answers will be generic.")
-        # Create an empty store (avoid crash)
-        return SKLearnVectorStore.from_texts(
-            texts=[""], embedding=embedder, metadatas=[{"source": "none", "page": 0}]
-        )
+        # keep the app alive even if data folder is empty
+        texts = [""]
+        metadatas = [{"source": "none", "page": 0}]
 
-    return SKLearnVectorStore.from_texts(texts=texts, embedding=embedder, metadatas=metadatas)
+    # Build a LangChain FAISS vectorstore (NOT raw faiss.Index)
+    vectordb = FAISS.from_texts(texts=texts, embedding=embedder, metadatas=metadatas)
+    return vectordb
 
 with st.spinner("Loading knowledge base..."):
     vectordb = load_vectordb()
 
-# --------- LLM, retriever, and prompt ---------
+# ---------- LLM, retriever, and prompt ----------
 llm: BaseChatModel = ChatOpenAI(api_key=OPENAI_API_KEY, model="gpt-4o-mini", temperature=0.3)
 retriever = vectordb.as_retriever(search_type="mmr", search_kwargs={"k": 6, "fetch_k": 12})
 
@@ -139,7 +137,7 @@ qa = RetrievalQA.from_chain_type(
     chain_type_kwargs={"prompt": prompt},
 )
 
-# --------- Chat box ---------
+# ---------- Chat box ----------
 user_q = st.chat_input("Ask your question…")
 if user_q:
     st.session_state.messages.append({"role": "user", "content": user_q})
