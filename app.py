@@ -1,62 +1,57 @@
-import streamlit as st
+# app.py
+import os
 from pathlib import Path
 from typing import List, Dict
 
+import streamlit as st
+
+# LangChain + OpenAI
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import SKLearnVectorStore
 from langchain.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
 
-
-
-# Optional for PDF ingest on first run
+# Optional: PDF reading (safe to run without it)
 try:
     from pypdf import PdfReader
 except Exception:
-    PdfReader = None  # handled later
+    PdfReader = None  # we’ll skip PDFs if pypdf isn’t available
 
-# --- Page config and header ---
-st.set_page_config(page_title="Ask C.S. Lewis Anything", page_icon="📚")
+
+# ------------------------- Streamlit UI -------------------------
+st.set_page_config(page_title="Ask C.S. Lewis", page_icon="📚", layout="centered")
 st.title("📚 Ask C.S. Lewis")
-st.markdown("Ask questions and receive answers drawn *only* from the writings of C.S. Lewis.")
+st.caption("Answers are composed *only* from the source texts you provide.")
 st.divider()
 
-# --- Initialize chat history ---
+# Chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
 
-# --- Secrets / API key (no .env on Streamlit Cloud) ---
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+# Secrets / API key
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    st.error("❌ OPENAI_API_KEY missing. Add it in Streamlit → Settings → Secrets.")
+    st.error("❌ Missing OPENAI_API_KEY. Add it in Streamlit → Settings → Secrets.")
     st.stop()
 
-# --- Vector store (FAISS) ---
-INDEX_DIR = "faiss_index"   # commit this dir if you prebuilt locally
-DATA_DIR = Path("data")     # put your PDFs / TXT here for PoC builds
+
+# ------------------------- Data ingest -------------------------
+DATA_DIR = Path("data")  # put your .txt / .pdf files here
 
 @st.cache_resource(show_spinner=False)
-def load_vectorstore():
-    """Load FAISS index if present; otherwise build a lightweight one from /data."""
+def build_vectorstore() -> SKLearnVectorStore:
+    """
+    Build a lightweight in-memory vector store using scikit-learn.
+    Pure Python: no FAISS, no tiktoken, no native compilers needed.
+    """
     emb = OpenAIEmbeddings(api_key=OPENAI_API_KEY, model="text-embedding-3-small")
 
-    # Try loading an existing FAISS index committed with the repo
-    try:
-        vs = FAISS.load_local(INDEX_DIR, emb, allow_dangerous_deserialization=True)
-        return vs
-    except Exception:
-        pass
-
-    # Fallback: build from /data (fast PoC). For production, prebuild locally and commit.
     if not DATA_DIR.exists():
-        st.error(
-            "No FAISS index found and /data folder does not exist. "
-            "Either commit a prebuilt index in 'faiss_index/' or add sources in 'data/'."
-        )
+        st.error("No 'data/' folder found. Add TXT/PDF files under 'data/'.")
         st.stop()
 
     texts: List[str] = []
@@ -66,13 +61,13 @@ def load_vectorstore():
     for p in DATA_DIR.rglob("*.txt"):
         try:
             content = p.read_text(encoding="utf-8", errors="ignore")
-            if content.strip():
-                texts.append(content)
-                metadatas.append({"source": str(p), "page": "N/A"})
         except Exception:
-            continue
+            content = ""
+        if content.strip():
+            texts.append(content)
+            metadatas.append({"source": str(p), "page": "N/A"})
 
-    # PDF files (one chunk per page for basic retrieval)
+    # PDF files (optional)
     if PdfReader:
         for p in DATA_DIR.rglob("*.pdf"):
             try:
@@ -86,42 +81,66 @@ def load_vectorstore():
                         texts.append(page_text)
                         metadatas.append({"source": str(p), "page": i})
             except Exception:
+                # continue on any single-PDF failure
                 continue
     else:
-        st.warning("pypdf not available; skipping PDF ingest. Add 'pypdf' to requirements.txt.")
+        st.info("`pypdf` not installed, skipping PDFs. Add `pypdf` to requirements.txt to enable.")
 
     if not texts:
-        st.error("Found no ingestible text in /data. Add PDFs/TXTs or commit a prebuilt index.")
+        st.error("No usable text found in 'data/'. Add PDFs/TXTs with content.")
         st.stop()
 
-    vs = FAISS.from_texts(texts=texts, embedding=emb, metadatas=metadatas)
-    vs.save_local(INDEX_DIR)
-    return vs
+    # Build the in-memory index
+    return SKLearnVectorStore.from_texts(texts=texts, embedding=emb, metadatas=metadatas)
 
-with st.spinner("Loading knowledge base..."):
-    vectordb = load_vectorstore()
 
-# --- LLM & Retriever ---
+with st.spinner("Loading knowledge base…"):
+    vectordb = build_vectorstore()
+
+
+# ------------------------- LLM + Chain -------------------------
 llm = ChatOpenAI(api_key=OPENAI_API_KEY, model="gpt-4o-mini", temperature=0.3)
-retriever = vectordb.as_retriever(search_type="mmr", search_kwargs={"k": 6, "fetch_k": 12})
 
-custom_prompt = PromptTemplate(
+prompt = PromptTemplate(
     input_variables=["context", "question"],
-    template="""
-You are C.S. Lewis, responding in the first person, as if writing a personal message or essay.
-
-Draw your answers only from the excerpts provided below, which are from your published works. Do not summarize or say "the text says"—this is you speaking. Let your tone reflect your style: logical, imaginative, vivid, and grounded in Christian theology. Use metaphor, wit, analogy, and vivid imagery as you often do.
-
-Avoid modern references (e.g., AI, ChatGPT, 21st century events) and do not refer to yourself as dead or historical. Stay in character as if you are writing contemporaneously.
-
----
-Excerpts:
-{context}
-
-Question:
-{question}
-
-Answer as C.S. Lewis:
-""", 
+    template=(
+        "You are C.S. Lewis, writing in first person.\n"
+        "Compose your answer ONLY from the excerpts below (drawn from your published works).\n"
+        "Do not say 'the text says'—write as yourself. Avoid modern references and do not refer to yourself as deceased.\n"
+        "\n---\nExcerpts:\n{context}\n\n"
+        "Question:\n{question}\n\n"
+        "Answer as C.S. Lewis:\n"
+    ),
 )
 
+qa = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=vectordb.as_retriever(search_type="mmr", search_kwargs={"k": 6, "fetch_k": 12}),
+    chain_type="stuff",
+    chain_type_kwargs={"prompt": prompt},
+    return_source_documents=True,
+)
+
+
+# ------------------------- Chat loop -------------------------
+user_input = st.chat_input("Ask C.S. Lewis anything about the texts…")
+if user_input:
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking…"):
+            result = qa({"query": user_input})
+            answer: str = result["result"]
+            sources = result.get("source_documents", []) or []
+            st.markdown(answer)
+
+            # show simple sources block
+            if sources:
+                with st.expander("Sources"):
+                    for i, doc in enumerate(sources, start=1):
+                        meta = doc.metadata or {}
+                        st.write(f"**{i}.** {meta.get('source','?')}  (page: {meta.get('page','?')})")
+
+    st.session_state.messages.append({"role": "assistant", "content": answer})
