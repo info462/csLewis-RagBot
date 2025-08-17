@@ -4,7 +4,10 @@ from typing import List, Dict
 
 # LangChain / OpenAI
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
+    from langchain_community.vectorstores import FAISS  # LC >= 0.1.x with split packages
+except Exception:
+    from langchain.vectorstores import FAISS           # older LC fallback
+
 from langchain.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
 
