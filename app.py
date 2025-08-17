@@ -120,8 +120,15 @@ def load_vectordb():
         texts = [""]
         metadatas = [{"source": "none", "page": 0}]
 
-    # Build a LangChain FAISS vectorstore (NOT raw faiss.Index)
-    vectordb = FAISS.from_texts(texts=texts, embedding=embedder, metadatas=metadatas)
+    # Instantiate our custom embedder
+    embedder = OpenAIEmbedder(model="text-embedding-3-small")
+
+    # Build a LangChain FAISS vectorstore
+    vectordb = FAISS.from_texts(
+        texts=texts,
+        embedding=embedder,
+        metadatas=metadatas
+    )
     return vectordb
 
 with st.spinner("Loading knowledge base..."):
