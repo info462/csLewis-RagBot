@@ -122,7 +122,6 @@ Question:
 {question}
 
 Answer as C.S. Lewis:
-""",
-    
+""",    
 )
 
