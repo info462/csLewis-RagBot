@@ -1,100 +1,153 @@
-from dotenv import load_dotenv
-import os
+# main.py — build/persist a FAISS index from PDFs and TXTs, then run a quick test query
 
-load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
-
-
+from pathlib import Path
 import os
 import glob
 import hashlib
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import Chroma
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# Optional: load .env locally; Streamlit Cloud will use Secrets
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    print("❌ OPENAI_API_KEY not found.")
+    raise SystemExit(1)
 
 print("🔥 Checking vector store...")
 
-# Load OpenAI key
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    print("❌ OPENAI_API_KEY not found.")
-    exit(1)
+# ---------- Config ----------
+DATA_DIR = Path("data")
+INDEX_DIR = Path("faiss_index")   # keep this identical in app.py
+HASH_FILE = Path("doc_hashes.txt")
 
-# Where we store PDF hash records
-HASH_FILE = "pdf_hashes.txt"
+# ---------- Deps ----------
+from langchain_community.document_loaders import TextLoader, PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
 
-def file_hash(path):
-    """Return SHA256 hash of a file."""
+# ---------- Helpers ----------
+def file_hash(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while chunk := f.read(8192):
             h.update(chunk)
     return h.hexdigest()
 
-# Find all PDFs
-pdf_files = sorted(glob.glob("data/*.pdf"))
-print(f"📄 Found {len(pdf_files)} PDFs.")
+# Collect docs
+pdf_files = sorted(glob.glob(str(DATA_DIR / "*.pdf")))
+txt_files = sorted(glob.glob(str(DATA_DIR / "*.txt")))
+print(f"📄 Found {len(pdf_files)} PDFs and {len(txt_files)} TXTs.")
 
 # Load previous hashes
 old_hashes = {}
-if os.path.exists(HASH_FILE):
-    with open(HASH_FILE, "r") as f:
-        for line in f:
-            filename, h = line.strip().split("|")
+if HASH_FILE.exists():
+    for line in HASH_FILE.read_text().splitlines():
+        if "|" in line:
+            filename, h = line.strip().split("|", 1)
             old_hashes[filename] = h
 
-# Detect changes
+# Detect changes (both PDFs and TXTs)
+all_files = pdf_files + txt_files
 changed_files = []
-for file in pdf_files:
+for file in all_files:
     new_hash = file_hash(file)
     if file not in old_hashes or old_hashes[file] != new_hash:
         changed_files.append(file)
 
-if not changed_files and os.path.exists("embeddings") and os.listdir("embeddings"):
-    print("✅ No changes detected. Using existing vector DB.")
-    exit(0)
+rebuild_needed = bool(changed_files) or not (INDEX_DIR.exists() and (INDEX_DIR / "index.faiss").exists())
 
-# If we got here, we need to rebuild
-print(f"🔄 Rebuilding vector store for {len(changed_files) or len(pdf_files)} PDFs...")
+if not rebuild_needed:
+    print("✅ No changes detected. Using existing FAISS index.")
+else:
+    target_count = len(changed_files) or len(all_files)
+    print(f"🔄 Rebuilding vector store for {target_count} file(s)...")
 
-# Load and split
-all_docs = []
-for file in pdf_files:
-    print(f"🔍 Loading {file}...")
-    loader = PyPDFLoader(file)
-    raw_docs = loader.load()
-    print(f"📄 {file} loaded with {len(raw_docs)} pages.")
-    all_docs.extend(raw_docs)
+    # Load documents
+    docs = []
+    for p in txt_files:
+        try:
+            docs.extend(TextLoader(str(p), encoding="utf-8").load())
+            print(f"📜 Loaded text: {p}")
+        except Exception as e:
+            print(f"⚠️ Skipped {p}: {e}")
 
-splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-docs = splitter.split_documents(all_docs)
-print(f"✅ Split into {len(docs)} chunks.")
+    for p in pdf_files:
+        try:
+            loader = PyPDFLoader(str(p))
+            pdf_pages = loader.load()
+            docs.extend(pdf_pages)
+            print(f"📘 Loaded PDF: {p} ({len(pdf_pages)} pages)")
+        except Exception as e:
+            print(f"⚠️ Skipped {p}: {e}")
 
-# Build embeddings
-embeddings = OpenAIEmbeddings(api_key=openai_api_key)
-vectordb = Chroma.from_documents(docs, embeddings, persist_directory="embeddings")
-vectordb.persist()
+    if not docs:
+        print("⚠️ No documents loaded. Ensure files exist in ./data")
+        raise SystemExit(0)
 
-# Save new hashes
-with open(HASH_FILE, "w") as f:
-    for file in pdf_files:
-        f.write(f"{file}|{file_hash(file)}\n")
+    # Normalize & chunk
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=200,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+    for d in docs:
+        d.page_content = " ".join(d.page_content.split())
 
-print("✅ Vector DB updated and saved.")
+    chunks = splitter.split_documents(docs)
+    print(f"✅ Split into {len(chunks)} chunks.")
 
-from langchain.chains.question_answering import load_qa_chain
-from langchain.llms import OpenAI
+    # Build & persist FAISS
+    embeddings = OpenAIEmbeddings(api_key=OPENAI_API_KEY, model="text-embedding-3-small")
+    vectordb = FAISS.from_documents(chunks, embeddings)
+    INDEX_DIR.mkdir(exist_ok=True)
+    vectordb.save_local(str(INDEX_DIR))
+    print("💾 Saved FAISS index to faiss_index/")
 
-llm = OpenAI(api_key=api_key, temperature=0)
+    # Save new hashes
+    with HASH_FILE.open("w") as f:
+        for file in all_files:
+            f.write(f"{file}|{file_hash(file)}\n")
+    print("🧾 Updated doc hashes.")
 
-# Ask a question
+# ---------- Load index (shared with app.py) ----------
+embeddings = OpenAIEmbeddings(api_key=OPENAI_API_KEY, model="text-embedding-3-small")
+vectordb = FAISS.load_local(
+    str(INDEX_DIR),
+    embeddings,
+    allow_dangerous_deserialization=True,  # required by LangChain 0.2.x
+)
+
+# ---------- Quick test query ----------
+llm = ChatOpenAI(api_key=OPENAI_API_KEY, model="gpt-4o-mini", temperature=0)
+prompt = PromptTemplate(
+    input_variables=["context", "question"],
+    template=(
+        "You are C.S. Lewis, writing in the first person. "
+        "Use ONLY the excerpts below; do not reference sources explicitly.\n\n"
+        "Excerpts:\n{context}\n\n"
+        "Question:\n{question}\n\n"
+        "Answer as C.S. Lewis:\n"
+    ),
+)
+qa = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=vectordb.as_retriever(search_type="mmr", search_kwargs={"k": 6, "fetch_k": 20}),
+    chain_type="stuff",
+    chain_type_kwargs={"prompt": prompt},
+    return_source_documents=True,
+)
+
 query = "What does C.S. Lewis say about pain?"
-docs = vectordb.similarity_search(query, k=5)
-
-for i, doc in enumerate(docs):
-    print(f"\n--- Document {i+1} ---")
-    print(f"Source: {doc.metadata.get('source')}, Page: {doc.metadata.get('page')}")
-    print(doc.page_content[:500] + "...")
-
-
+res = qa(query)
+print("\n🧠 Answer:\n", res["result"])
+print("\n📚 Sources:")
+for i, d in enumerate(res.get("source_documents", []) or [], 1):
+    meta = d.metadata or {}
+    print(f"  {i}. {meta.get('source','?')} — page {meta.get('page','?')}")
