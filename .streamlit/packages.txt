@@ -1,2 +1,5 @@
 python3.10-venv
 python3.10-dev
+build-essential
+swig
+rustc
