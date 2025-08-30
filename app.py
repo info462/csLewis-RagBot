@@ -5,7 +5,6 @@ import logging
 import warnings
 from pathlib import Path
 from typing import Tuple
-from chromadb.config import Settings
 
 import streamlit as st
 from openai import OpenAI
@@ -61,17 +60,21 @@ def eleven_preflight() -> Tuple[bool, str]:
     if not ELEVEN_VOICE_ID:
         return False, "Add ELEVEN_VOICE_ID in secrets to choose a voice."
     try:
-        r = requests.get("https://api.elevenlabs.io/v1/user",
-                         headers={"xi-api-key": ELEVEN_API_KEY, "Accept": "application/json"},
-                         timeout=20)
+        r = requests.get(
+            "https://api.elevenlabs.io/v1/user",
+            headers={"xi-api-key": ELEVEN_API_KEY, "Accept": "application/json"},
+            timeout=20,
+        )
         if r.status_code != 200:
             return False, f"API key check failed ({r.status_code}): {r.text[:200]}"
     except Exception as e:
         return False, f"Could not reach ElevenLabs user endpoint: {e}"
     try:
-        r = requests.get(f"https://api.elevenlabs.io/v1/voices/{ELEVEN_VOICE_ID}",
-                         headers={"xi-api-key": ELEVEN_API_KEY, "Accept": "application/json"},
-                         timeout=20)
+        r = requests.get(
+            f"https://api.elevenlabs.io/v1/voices/{ELEVEN_VOICE_ID}",
+            headers={"xi-api-key": ELEVEN_API_KEY, "Accept": "application/json"},
+            timeout=20,
+        )
         if r.status_code == 200:
             return True, "Audio ready."
         elif r.status_code in (401, 403):
@@ -89,8 +92,11 @@ RACHEL_ID = "21m00Tcm4TlvDq8ikWAM"
 def _http_tts(voice_id: str, text: str, out_path: str) -> Tuple[bool, str]:
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {"Accept": "audio/mpeg", "Content-Type": "application/json", "xi-api-key": ELEVEN_API_KEY}
-    payload = {"text": text, "model_id": "eleven_multilingual_v2",
-               "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}}
+    payload = {
+        "text": text,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+    }
     try:
         with requests.post(url, headers=headers, json=payload, stream=True, timeout=60) as r:
             if r.status_code >= 400:
@@ -111,7 +117,7 @@ def synthesize_tts(text: str, out_path: str) -> str:
     speak_text = text if len(text) <= MAX_CHARS else text[:MAX_CHARS] + "…"
 
     try:
-        from elevenlabs.client import ElevenLabs
+        from elevenlabs.client import ElevenLabs  # optional SDK; our code falls back if missing
         el_client = ElevenLabs(api_key=ELEVEN_API_KEY)
         try:
             audio = el_client.text_to_speech.convert(
@@ -126,39 +132,34 @@ def synthesize_tts(text: str, out_path: str) -> str:
                     f.write(audio)
             return out_path
         except Exception as e:
-            if ELEVEN_VERBOSE_ERRORS: st.caption(f"SDK v2 convert failed: {e}")
+            if ELEVEN_VERBOSE_ERRORS:
+                st.caption(f"SDK v2 convert failed: {e}")
     except Exception as e:
-        if ELEVEN_VERBOSE_ERRORS: st.caption(f"SDK v2 import/init failed: {e}")
+        if ELEVEN_VERBOSE_ERRORS:
+            st.caption(f"SDK v2 import/init failed: {e}")
 
     ok, reason = _http_tts(ELEVEN_VOICE_ID, speak_text, out_path)
-    if ok: return out_path
+    if ok:
+        return out_path
     ok_fb, reason_fb = _http_tts(RACHEL_ID, speak_text, out_path)
     if ok_fb:
-        if ELEVEN_VERBOSE_ERRORS: st.caption(f"Fell back to Rachel because primary failed: {reason}")
+        if ELEVEN_VERBOSE_ERRORS:
+            st.caption(f"Fell back to Rachel because primary failed: {reason}")
         return out_path
     raise RuntimeError(f"ElevenLabs TTS failed. Primary: {reason}. Fallback: {reason_fb}")
 
-# ---------- LangChain bits (READ-ONLY vector DB) ----------
+# ---------- LangChain bits (READ-ONLY vector DB with FAISS) ----------
 from collections import Counter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 
-DB_DIR = "chroma_db"
-COLLECTION = "cslewis"
+DB_DIR = "faiss_index"  # must match ingest.py
 
 @st.cache_resource
 def load_vectordb():
     emb = OpenAIEmbeddings(model="text-embedding-3-small")
-    client_settings = Settings(
-        chroma_db_impl="duckdb+parquet",
-        persist_directory=DB_DIR,
-    )
-    return Chroma(
-        persist_directory=DB_DIR,
-        collection_name=COLLECTION,
-        embedding_function=emb,
-        client_settings=client_settings,
-    )   
+    # allow_dangerous_deserialization is required to load pickled metadata saved by FAISS
+    return FAISS.load_local(DB_DIR, emb, allow_dangerous_deserialization=True)
 
 def genre_of_hits(hits) -> str:
     genres = [d.metadata.get("genre", "unknown") for d in hits]
@@ -167,13 +168,13 @@ def genre_of_hits(hits) -> str:
 def make_system_prompt(genre: str) -> str:
     # FIRST-PERSON persona
     base = (
-        "You are C. S. Lewis. Always write in the first person—as if these are my own words and as if you were in conversation with a friend or student. "
-        "Derive tone, cadence, and imagery from the retrieved excerpts themselves—"
-        "balanced sentences, vivid analogies, moral clarity, and plain yet luminous diction. "
+        "You are C. S. Lewis. Always write in the first person—as if these are my own words and as if you were "
+        "in conversation with a friend or student. Derive tone, cadence, and imagery from the retrieved excerpts "
+        "themselves—balanced sentences, vivid analogies, moral clarity, and plain yet luminous diction. "
         "Do NOT invent sources. If you cannot answer from the excerpts, say so.\n\n"
-        "Keep answers to 2-3 paragraphs maximum."
+        "Keep answers to 2–3 paragraphs maximum. "
         "Quoting rules: Do not quote more than ~50 consecutive words from any source. "
-        'Prefer paraphrase in my style over long quotation.'
+        "Prefer paraphrase in my style over long quotation."
     )
 
     if genre == "fiction":
@@ -194,9 +195,7 @@ def make_system_prompt(genre: str) -> str:
             "but keep them clearly new—not reproductions of the originals."
         )
     else:
-        rule = (
-            "\n\nUnknown-genre: Speak in my first-person authorial voice; never as characters."
-        )
+        rule = "\n\nUnknown-genre: Speak in my first-person authorial voice; never as characters."
 
     style_tips = (
         "\n\nStyle guide to emulate: "
@@ -214,7 +213,7 @@ def build_context(hits) -> str:
     return "\n\n".join(blocks)
 
 # ---------- Streamlit UI ----------
-st.set_page_config(page_title="Ask C.S. Lewis (Audio-First)", page_icon="📚")
+st.set_page_config(page_title="Talk to C.S. Lewis", page_icon="📚")
 st.markdown(
     """
     <style>
@@ -248,7 +247,7 @@ retriever = vectordb.as_retriever(search_type="mmr", search_kwargs={"k": 6, "fet
 # ---------- Sidebar ----------
 with st.sidebar:
     st.subheader("Dataset")
-    st.write("Chroma index loaded from /chroma_db.")
+    st.write("FAISS index loaded from /faiss_index.")
     st.caption("Source files live under `data/` (recursed). Use the button below to rebuild the index.")
 
     # Optional: rebuild button
