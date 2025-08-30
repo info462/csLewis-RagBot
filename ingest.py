@@ -13,16 +13,13 @@ from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from chromadb.config import Settings
-
+from langchain_community.vectorstores import FAISS
 
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 # --------- Config ---------
 DOC_ROOT = Path("data")          # your PDFs (already OCR'd) live here
-DB_DIR = "chroma_db"             # Chroma persistence folder
-COLLECTION = "cslewis"
+DB_DIR = "faiss_index"           # FAISS persistence folder (directory)
 ALLOWED_GENRES = {"fiction", "nonfiction", "poetry"}  # case-insensitive
 
 # --------- Env / API key ---------
@@ -35,7 +32,7 @@ if not OPENAI_API_KEY:
     )
 
 # --------- Helpers ---------
-_ws_collapse = re.compile(r"[ \t\u00A0]+")  # collapse weird intra-line spaces
+_ws_collapse = re.compile(r"[ \t\u00A0]+")
 
 def normalize_text(t: str) -> str:
     """
@@ -46,8 +43,7 @@ def normalize_text(t: str) -> str:
     """
     if not t:
         return ""
-    # Keep newlines; normalize spaces inside lines
-    lines = [ _ws_collapse.sub(" ", ln).rstrip() for ln in t.splitlines() ]
+    lines = [_ws_collapse.sub(" ", ln).rstrip() for ln in t.splitlines()]
     return "\n".join(lines).strip()
 
 def infer_genre(path: Path) -> str:
@@ -56,12 +52,10 @@ def infer_genre(path: Path) -> str:
     return parent if parent in ALLOWED_GENRES else "unknown"
 
 def content_hash(text: str, meta: Dict) -> str:
-    """
-    Stable hash of content + a few metadata fields to avoid dupes.
-    """
+    """Stable hash of content + a few metadata fields to avoid dupes."""
     h = hashlib.sha256()
     h.update(text.encode("utf-8", errors="ignore"))
-    h.update(("|" + meta.get("work_title","") + "|" + meta.get("genre","")).encode("utf-8"))
+    h.update(("|" + meta.get("work_title", "") + "|" + meta.get("genre", "")).encode("utf-8"))
     return h.hexdigest()[:16]
 
 def load_and_split_docs(root: Path) -> List:
@@ -105,13 +99,11 @@ def load_and_split_docs(root: Path) -> List:
         chunks = splitter.split_documents(pages)
 
         # add chunk_id and drop empty chunks
-        kept = []
         for idx, ch in enumerate(chunks):
             if not ch.page_content.strip():
                 continue
             ch.metadata["chunk_id"] = f"{work_title}:{idx:05d}"
-            kept.append(ch)
-        all_chunks.extend(kept)
+            all_chunks.append(ch)
 
     # De-duplicate by content hash (common with re-OCR or overlapping pages)
     deduped = []
@@ -136,13 +128,6 @@ def load_and_split_docs(root: Path) -> List:
     return deduped
 
 # --- Vector store: FAISS (Cloud-friendly) ---
-import shutil
-from pathlib import Path
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-
-DB_DIR = "faiss_index"  # folder where the FAISS index + metadata will be saved
-
 def rebuild_vectorstore():
     """Wipe and rebuild the FAISS index from /data."""
     # Hard wipe to avoid stale indexes
@@ -154,8 +139,8 @@ def rebuild_vectorstore():
         raise RuntimeError("No documents were loaded. Check your /data folder.")
 
     embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",   # upgrade to -3-large for higher recall if desired
-        api_key=OPENAI_API_KEY,           # ingest.py runs outside Streamlit, so pass the key here
+        model="text-embedding-3-small",  # upgrade to -3-large for higher recall if desired
+        api_key=OPENAI_API_KEY,          # ingest.py runs outside Streamlit, so pass the key here
     )
 
     # Build FAISS in-memory
@@ -168,4 +153,3 @@ def rebuild_vectorstore():
 
 if __name__ == "__main__":
     rebuild_vectorstore()
-
