@@ -14,6 +14,8 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
+from chromadb.config import Settings
+
 
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
@@ -148,12 +150,18 @@ def rebuild_vectorstore():
         api_key=OPENAI_API_KEY,           # important: ingest.py runs outside Streamlit
     )
 
-    _ = Chroma.from_documents(
-        documents=docs,
-        embedding=embeddings,
-        persist_directory=DB_DIR,
-        collection_name=COLLECTION,
-    )
+   client_settings = Settings(
+    chroma_db_impl="duckdb+parquet",
+    persist_directory=DB_DIR,
+)
+
+_ = Chroma.from_documents(
+    documents=docs,
+    embedding=embeddings,
+    persist_directory=DB_DIR,
+    collection_name=COLLECTION,
+    client_settings=client_settings,
+)
 
     print(f"[INGEST] Vector store rebuilt at '{DB_DIR}' (collection '{COLLECTION}').")
 
