@@ -8,10 +8,8 @@ langchain==0.2.14
 langchain-community==0.2.11
 langchain-openai==0.1.22
 
-# Vector store (Chroma + DuckDB backend)
-chromadb==0.5.12
-duckdb==1.0.0
-pandas>=2.2
+# Vector store (FAISS)
+faiss-cpu==1.8.0.post1
 
 # PDF / utilities
 pypdf==4.2.0
