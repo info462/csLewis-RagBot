@@ -5,6 +5,7 @@ import logging
 import warnings
 from pathlib import Path
 from typing import Tuple
+from chromadb.config import Settings
 
 import streamlit as st
 from openai import OpenAI
@@ -148,9 +149,16 @@ COLLECTION = "cslewis"
 @st.cache_resource
 def load_vectordb():
     emb = OpenAIEmbeddings(model="text-embedding-3-small")
-    return Chroma(persist_directory=DB_DIR,
-                  collection_name=COLLECTION,
-                  embedding_function=emb)
+    client_settings = Settings(
+        chroma_db_impl="duckdb+parquet",
+        persist_directory=DB_DIR,
+    )
+    return Chroma(
+        persist_directory=DB_DIR,
+        collection_name=COLLECTION,
+        embedding_function=emb,
+        client_settings=client_settings,
+    )   
 
 def genre_of_hits(hits) -> str:
     genres = [d.metadata.get("genre", "unknown") for d in hits]
