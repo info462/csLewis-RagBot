@@ -17,6 +17,3 @@ pandas>=2.2
 pypdf==4.2.0
 python-dotenv==1.0.1
 requests==2.32.3
-
-# Audio
-elevenlabs==1.2.3
