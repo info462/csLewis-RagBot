@@ -135,9 +135,17 @@ def load_and_split_docs(root: Path) -> List:
 
     return deduped
 
+# --- Vector store: FAISS (Cloud-friendly) ---
+import shutil
+from pathlib import Path
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+
+DB_DIR = "faiss_index"  # folder where the FAISS index + metadata will be saved
+
 def rebuild_vectorstore():
-    """Wipe and rebuild the persistent Chroma index from /data."""
-    # Hard wipe to avoid stale collections
+    """Wipe and rebuild the FAISS index from /data."""
+    # Hard wipe to avoid stale indexes
     if Path(DB_DIR).exists():
         shutil.rmtree(DB_DIR, ignore_errors=True)
 
@@ -146,24 +154,18 @@ def rebuild_vectorstore():
         raise RuntimeError("No documents were loaded. Check your /data folder.")
 
     embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",   # upgrade to -3-large if you want higher recall
-        api_key=OPENAI_API_KEY,           # important: ingest.py runs outside Streamlit
+        model="text-embedding-3-small",   # upgrade to -3-large for higher recall if desired
+        api_key=OPENAI_API_KEY,           # ingest.py runs outside Streamlit, so pass the key here
     )
 
-   client_settings = Settings(
-    chroma_db_impl="duckdb+parquet",
-    persist_directory=DB_DIR,
-)
+    # Build FAISS in-memory
+    vs = FAISS.from_documents(docs, embeddings)
 
-_ = Chroma.from_documents(
-    documents=docs,
-    embedding=embeddings,
-    persist_directory=DB_DIR,
-    collection_name=COLLECTION,
-    client_settings=client_settings,
-)
+    # Persist to disk (directory with index + metadata)
+    vs.save_local(DB_DIR)
 
-    print(f"[INGEST] Vector store rebuilt at '{DB_DIR}' (collection '{COLLECTION}').")
+    print(f"[INGEST] FAISS index rebuilt at '{DB_DIR}' with {len(docs)} chunks.")
 
 if __name__ == "__main__":
     rebuild_vectorstore()
+
