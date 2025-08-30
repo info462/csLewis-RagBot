@@ -158,8 +158,28 @@ DB_DIR = "faiss_index"  # must match ingest.py
 @st.cache_resource
 def load_vectordb():
     emb = OpenAIEmbeddings(model="text-embedding-3-small")
-    # allow_dangerous_deserialization is required to load pickled metadata saved by FAISS
+
+    # check if the FAISS index exists
+    idx_dir = Path(DB_DIR)
+    idx_file = idx_dir / "index.faiss"
+    meta_file = idx_dir / "index.pkl"
+
+    if not (idx_file.exists() and meta_file.exists()):
+        # try to build it once on the server
+        try:
+            from ingest import rebuild_vectorstore
+            with st.spinner("No FAISS index found — building it from /data (one-time)…"):
+                rebuild_vectorstore()
+        except Exception as e:
+            st.error(
+                "Could not build the FAISS index automatically. "
+                "Open the sidebar and click **“🔁 Rebuild index from /data”**."
+            )
+            st.stop()
+
+    # now load it
     return FAISS.load_local(DB_DIR, emb, allow_dangerous_deserialization=True)
+
 
 def genre_of_hits(hits) -> str:
     genres = [d.metadata.get("genre", "unknown") for d in hits]
