@@ -1,14 +1,22 @@
-streamlit>=1.35
-openai>=1.40.0
-pydantic>=2.6
-httpx>=0.27
-tiktoken>=0.7
-langchain>=0.2.10       
-langchain-community>=0.2.10
-langchain-openai>=0.1.14 
-faiss-cpu>=1.8.0
-pypdf>=4.2.0   # only if you want PDF support
-elevenlabs>=2.11.0
-chromadb==0.5.6
+streamlit==1.36.0
+openai==1.44.0
+pydantic==2.7.4
+httpx==0.27.0
+tiktoken==0.7.0
+
+langchain==0.2.14
+langchain-community==0.2.11
+langchain-openai==0.1.22
+
+# Vector store (Chroma + DuckDB backend)
+chromadb==0.5.12
 duckdb==1.0.0
 pandas>=2.2
+
+# PDF / utilities
+pypdf==4.2.0
+python-dotenv==1.0.1
+requests==2.32.3
+
+# Audio
+elevenlabs==1.2.3
